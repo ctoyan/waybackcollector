@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"crypto/sha1"
+	"os"
 )
 
 type HistoryItem struct {
@@ -22,14 +23,21 @@ func main() {
 	dateTo 	   := flag.String("to", "", "Date on which to end collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to last ever record.")
 	limit 	   := flag.Int("limit", 0, "Limit the results")
 	filter 	 	 := flag.String("filter", "", "Filter your search, using the wayback cdx filters (find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#filtering)")
-	urlsOnly 	 := flag.Bool("urls-only", false, "Get only a list of historic URLs")
-	uniqueOnly := flag.Bool("unique-only", false, "Show only unique reponses")
+
+	urls		 	 := flag.Bool("urls", false, "Print to stdout only a list of historic URLs, which you can request later")
+	unique		 := flag.Bool("unique", false, "Print to stdout only unique reponses")
 	output 		 := flag.String("output", "", "Path to a folder where the tool will safe all unique responses in uniquely named files per response (meg style output)")
 
 	flag.Parse()
 
 	if *url == "" {
 		log.Fatal("url argument is required")
+	}
+
+	if (*urls && *unique)     ||
+		 (*urls && *output != "")   ||
+		 (*unique && *output != "") {
+		log.Fatal("you can only set one of the following arguments: urls, unique, output")
 	}
 
 	requestUrl := fmt.Sprintf("https://web.archive.org/cdx/search/cdx?url=%v&output=json&fl=timestamp,digest,length", *url)
@@ -46,7 +54,7 @@ func main() {
 	for _, hi := range historyItems {
 		historyUrl := fmt.Sprintf("https://web.archive.org/web/%vif_/%v", hi.Timestamp, *url)
 
-		if *urlsOnly {
+		if *urls {
 			allHistoryUrls = append(allHistoryUrls, historyUrl)
 			continue
 			return
@@ -54,16 +62,17 @@ func main() {
 
 		body := get(historyUrl)
 
-		if *uniqueOnly || *output != "" {
+		if *unique || *output != "" {
 			uniqueResponses[sha1.Sum(body)] = body
 		}
 
-		if !*uniqueOnly && !*urlsOnly {
+		if !*unique && !*urls {
 			fmt.Println(string(body))
 		}
 	}
 
 	if *output != "" {
+		os.MkdirAll(*output, 0700)
 		for k, _ := range uniqueResponses {
 			err := ioutil.WriteFile(fmt.Sprintf("%v/%x", *output, k), uniqueResponses[k], 0644)
 			if err != nil {
@@ -72,14 +81,14 @@ func main() {
 		}
 	}
 
-	if *urlsOnly {
+	if *urls {
 		for _, au := range allHistoryUrls {
 			fmt.Println(au)
 		}
 		return
 	}
 
-	if *uniqueOnly {
+	if *unique {
 		for k, _ := range uniqueResponses {
 			fmt.Println(string(uniqueResponses[k]))
 		}
