@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -78,27 +79,30 @@ func main() {
 	}
 
 	var allHistoryUrls []string
-	historicResponses := make(chan []byte)
+	var wg sync.WaitGroup
+	historicResponses := make([][]byte, len(historyItems))
 	for i, hi := range historyItems {
 		historyUrl := fmt.Sprintf("https://web.archive.org/web/%vif_/%v", hi.Timestamp, *url)
 
 		if *printUrls {
 			allHistoryUrls = append(allHistoryUrls, historyUrl)
 			continue
-			return
 		}
 
+		wg.Add(1)
 		if i%MAX_REQUESTS_COUNT == 0 {
 			time.Sleep(PAUSE_INTERVAL * time.Second)
 		}
 
 		go func() {
-			historicResponses <- get(historyUrl)
+			historicResponses = append(historicResponses, get(historyUrl))
+			wg.Done()
 		}()
 	}
+	wg.Wait()
 
 	uniqueResponses := make(map[[20]byte][]byte)
-	for res := range historicResponses {
+	for _, res := range historicResponses {
 		if *output != "" || *unique {
 			uniqueResponses[sha1.Sum(res)] = res
 		}
