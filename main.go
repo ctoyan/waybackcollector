@@ -9,7 +9,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
+
+// Wayback CDX Server rate limits requests
+const MAX_REQUESTS_COUNT = 28
+
+// Pause the requests every 4 seconds
+const PAUSE_INTERVAL = 4
 
 type HistoryItem struct {
 	Timestamp string
@@ -23,8 +30,10 @@ func main() {
 	dateTo := flag.String("to", "", "Date on which to end collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to last ever record.")
 	limit := flag.Int("limit", 0, "Limit the results")
 	filter := flag.String("filter", "", "Filter your search, using the wayback cdx filters (find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#filtering)")
+	collapse := flag.String("collapse", "", "A form of filtering, with which you can collaps adjasent fields(find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#collapsing)")
 
-	urls := flag.Bool("urls", false, "Print to stdout only a list of historic URLs, which you can request later")
+	estimateTime := flag.Bool("time", false, "Show how much time it would take to make all requests for the current query")
+	printUrls := flag.Bool("print-urls", false, "Print to stdout only a list of historic URLs, which you can request later")
 	unique := flag.Bool("unique", false, "Print to stdout only unique reponses")
 	output := flag.String("output", "", "Path to a folder where the tool will safe all unique responses in uniquely named files per response (meg style output)")
 
@@ -34,10 +43,10 @@ func main() {
 		log.Fatal("url argument is required")
 	}
 
-	if (*urls && *unique) ||
-		(*urls && *output != "") ||
+	if (*printUrls && *unique) ||
+		(*printUrls && *output != "") ||
 		(*unique && *output != "") {
-		log.Fatal("you can only set one of the following arguments: urls, unique, output")
+		log.Fatal("you can only set one of the following arguments: print-urls, unique, output")
 	}
 
 	requestUrl := fmt.Sprintf("https://web.archive.org/cdx/search/cdx?url=%v&output=json&fl=timestamp,digest,length", *url)
@@ -51,32 +60,66 @@ func main() {
 	if *limit != 0 {
 		requestUrl += fmt.Sprintf("&limit=%v", *limit)
 	}
+	if *collapse != "" {
+		requestUrl += fmt.Sprintf("&collapse=%v", *collapse)
+	}
 	if *filter != "" {
 		requestUrl += fmt.Sprintf("&filter=%v", *filter)
 	}
 
-	uniqueResponses := make(map[[20]byte][]byte)
-	var allHistoryUrls []string
-
 	historyItems := getHistoryItems(requestUrl)
-	for _, hi := range historyItems {
+	if *estimateTime {
+		requestsCount := len(historyItems)
+		duration, err := time.ParseDuration(fmt.Sprintf("%vs", requestsCount/(MAX_REQUESTS_COUNT/PAUSE_INTERVAL)))
+		if err != nil {
+			log.Fatalf("error parsing duration: %v", err)
+		}
+		fmt.Printf("All %v requests will take %v", requestsCount, duration)
+	}
+
+	var allHistoryUrls []string
+	historicResponses := make(chan []byte)
+	for i, hi := range historyItems {
 		historyUrl := fmt.Sprintf("https://web.archive.org/web/%vif_/%v", hi.Timestamp, *url)
 
-		if *urls {
+		if *printUrls {
 			allHistoryUrls = append(allHistoryUrls, historyUrl)
 			continue
 			return
 		}
 
-		body := get(historyUrl)
-
-		if *unique || *output != "" {
-			uniqueResponses[sha1.Sum(body)] = body
+		if i%MAX_REQUESTS_COUNT == 0 {
+			time.Sleep(PAUSE_INTERVAL * time.Second)
 		}
 
-		if !*unique && !*urls {
-			fmt.Println(string(body))
+		go func() {
+			historicResponses <- get(historyUrl)
+		}()
+	}
+
+	uniqueResponses := make(map[[20]byte][]byte)
+	for res := range historicResponses {
+		if *output != "" || *unique {
+			uniqueResponses[sha1.Sum(res)] = res
 		}
+
+		if !*unique && !*printUrls && *output == "" {
+			fmt.Println(string(res))
+		}
+	}
+
+	if *unique {
+		for k, _ := range uniqueResponses {
+			fmt.Println(string(uniqueResponses[k]))
+		}
+		return
+	}
+
+	if *printUrls {
+		for _, au := range allHistoryUrls {
+			fmt.Println(au)
+		}
+		return
 	}
 
 	if *output != "" {
@@ -86,19 +129,6 @@ func main() {
 			if err != nil {
 				log.Fatalf("error writing to file: %v", err)
 			}
-		}
-	}
-
-	if *urls {
-		for _, au := range allHistoryUrls {
-			fmt.Println(au)
-		}
-		return
-	}
-
-	if *unique {
-		for k, _ := range uniqueResponses {
-			fmt.Println(string(uniqueResponses[k]))
 		}
 	}
 }
