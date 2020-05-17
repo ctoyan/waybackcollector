@@ -13,12 +13,6 @@ import (
 	"time"
 )
 
-// Wayback CDX Server rate limits requests
-const MAX_REQUESTS_COUNT = 28
-
-// Pause the requests every 4 seconds
-const PAUSE_INTERVAL = 4
-
 type HistoryItem struct {
 	Timestamp string
 	Digest    string
@@ -33,6 +27,7 @@ func main() {
 	filter := flag.String("filter", "", "Filter your search, using the wayback cdx filters (find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#filtering)")
 	collapse := flag.String("collapse", "", "A form of filtering, with which you can collaps adjasent fields(find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#collapsing)")
 
+	requestsPerSecond := flag.Int("req-per-sec", 0, "Requests per second. 0 means no one request at a time")
 	estimateTime := flag.Bool("time", false, "Show how much time it would take to make all requests for the current query")
 	printUrls := flag.Bool("print-urls", false, "Print to stdout only a list of historic URLs, which you can request later")
 	unique := flag.Bool("unique", false, "Print to stdout only unique reponses")
@@ -69,13 +64,14 @@ func main() {
 	}
 
 	historyItems := getHistoryItems(requestUrl)
+
 	if *estimateTime {
 		requestsCount := len(historyItems)
-		duration, err := time.ParseDuration(fmt.Sprintf("%vs", requestsCount/(MAX_REQUESTS_COUNT/PAUSE_INTERVAL)))
+		duration, err := time.ParseDuration(fmt.Sprintf("%vs", requestsCount/(*requestsPerSecond)))
 		if err != nil {
 			log.Fatalf("error parsing duration: %v", err)
 		}
-		fmt.Printf("All %v requests will take %v", requestsCount, duration)
+		fmt.Printf("All %v requests will be made in %v", requestsCount, duration)
 	}
 
 	var allHistoryUrls []string
@@ -89,13 +85,17 @@ func main() {
 			continue
 		}
 
-		wg.Add(1)
-		if i%MAX_REQUESTS_COUNT == 0 {
-			time.Sleep(PAUSE_INTERVAL * time.Second)
+		if i%*requestsPerSecond == 0 {
+			time.Sleep(1 * time.Second)
 		}
 
+		wg.Add(1)
 		go func() {
-			historicResponses = append(historicResponses, get(historyUrl))
+			response := get(historyUrl)
+			if !*printUrls && !*unique && *output == "" {
+				fmt.Println(string(response))
+			}
+			historicResponses = append(historicResponses, response)
 			wg.Done()
 		}()
 	}
