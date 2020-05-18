@@ -31,7 +31,8 @@ func main() {
 	estimateTime := flag.Bool("time", false, "Show how much time it would take to make all requests for the current query")
 	printUrls := flag.Bool("print-urls", false, "Print to stdout only a list of historic URLs, which you can request later")
 	unique := flag.Bool("unique", false, "Print to stdout only unique reponses")
-	output := flag.String("output", "", "Path to a folder where the tool will safe all unique responses in uniquely named files per response (meg style output)")
+	output := flag.String("output", "", "Path to a folder where the tool will safe all unique responses in uniquely named files per response")
+	logFile := flag.String("log-file", "", "Log every wayback history request url, but not the response")
 
 	flag.Parse()
 
@@ -63,6 +64,8 @@ func main() {
 		requestUrl += fmt.Sprintf("&filter=%v", *filter)
 	}
 
+	addToLog("Main request url: "+requestUrl, *logFile)
+
 	historyItems := getHistoryItems(requestUrl)
 
 	if *estimateTime {
@@ -91,11 +94,20 @@ func main() {
 
 		wg.Add(1)
 		go func() {
-			response := get(historyUrl)
+			addToLog("Hisotry item request url: "+historyUrl, *logFile)
+
+			response, err := get(historyUrl)
+			if err != nil {
+				fmt.Printf("error making history item request: %v", err)
+				addToLog(fmt.Sprintf("ERROR fetching %v: %v", historyUrl, err), *logFile)
+			}
+
 			if !*printUrls && !*unique && *output == "" {
 				fmt.Println(string(response))
 			}
+
 			historicResponses = append(historicResponses, response)
+
 			wg.Done()
 		}()
 	}
@@ -137,26 +149,44 @@ func main() {
 	}
 }
 
-func get(url string) []byte {
+func addToLog(logRow string, logFile string) {
+	if logFile != "" {
+		f, err := os.OpenFile(logFile,
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatalf("error writing to log file: %v", err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(logRow + "\n"); err != nil {
+			log.Fatalf("error writing to log file: %v", err)
+		}
+	}
+}
+
+func get(url string) (body []byte, err error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Fatalf("error making get request: %v", err)
+		return nil, err
 	}
+
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("error reading response body: %v", err)
+		return nil, err
 	}
 
-	return body
+	return body, nil
 }
 
 func getHistoryItems(requestUrl string) []HistoryItem {
-	body := get(requestUrl)
+	body, err := get(requestUrl)
+	if err != nil {
+		log.Fatalf("error getting history items: %v", err)
+	}
 
 	var timestamps2d [][]string
-	err := json.Unmarshal(body, &timestamps2d)
+	err = json.Unmarshal(body, &timestamps2d)
 	if err != nil {
 		log.Fatalf("error parsing timestamps: %v", err)
 	}
