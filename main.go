@@ -21,18 +21,20 @@ type HistoryItem struct {
 
 func main() {
 	url := flag.String("url", "", "URL pattern to collect responses for")
-	dateFrom := flag.String("from", "", "Date on which to start collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to first ever record.")
-	dateTo := flag.String("to", "", "Date on which to end collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to last ever record.")
+	dateFrom := flag.String("from", "", "Date on which to start collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to first ever record")
+	dateTo := flag.String("to", "", "Date on which to end collecing responses. Inclusive. Format: yyyyMMddhhmmss. Defaults to last ever record")
 	limit := flag.Int("limit", 0, "Limit the results")
 	filter := flag.String("filter", "", "Filter your search, using the wayback cdx filters (find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#filtering)")
 	collapse := flag.String("collapse", "", "A form of filtering, with which you can collaps adjasent fields(find more here: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server#collapsing)")
 
-	requestsPerSecond := flag.Int("req-per-sec", 0, "Requests per second. 0 means no one request at a time")
-	estimateTime := flag.Bool("time", false, "Show how much time it would take to make all requests for the current query")
+	requestsPerSecond := flag.Int("req-per-sec", 1, "Requests per second. Defaults to 1")
+	estimateTime := flag.Bool("time", false, "Show how much time it would take to make all requests for the current query and exit (without response time take into account)")
 	printUrls := flag.Bool("print-urls", false, "Print to stdout only a list of historic URLs, which you can request later")
 	unique := flag.Bool("unique", false, "Print to stdout only unique reponses")
-	output := flag.String("output", "", "Path to a folder where the tool will safe all unique responses in uniquely named files per response")
-	logFile := flag.String("log-file", "", "Log every wayback history request url, but not the response")
+	outputFolder := flag.String("output-folder", "", "Path to a folder where the tool will safe all unique responses, in uniquely named files")
+	logSuccessFile := flag.String("log-success-file", "", "Path to log file. Log successful request urls only")
+	logFailFile := flag.String("log-fail-file", "", "Path to log file. Log failed requests only")
+	verbose := flag.Bool("verbose", false, "Show more detailed output")
 
 	flag.Parse()
 
@@ -41,8 +43,8 @@ func main() {
 	}
 
 	if (*printUrls && *unique) ||
-		(*printUrls && *output != "") ||
-		(*unique && *output != "") {
+		(*printUrls && *outputFolder != "") ||
+		(*unique && *outputFolder != "") {
 		log.Fatal("you can only set one of the following arguments: print-urls, unique, output")
 	}
 
@@ -64,101 +66,88 @@ func main() {
 		requestUrl += fmt.Sprintf("&filter=%v", *filter)
 	}
 
-	addToLog("Main request url: "+requestUrl, *logFile)
+	printVerbose(fmt.Sprintf("[*] Constructed main request url: %v", requestUrl), *verbose)
 
 	historyItems := getHistoryItems(requestUrl)
-
-	if *estimateTime {
-		requestsCount := len(historyItems)
-		duration, err := time.ParseDuration(fmt.Sprintf("%vs", requestsCount/(*requestsPerSecond)))
-		if err != nil {
-			log.Fatalf("error parsing duration: %v", err)
-		}
-		fmt.Printf("All %v requests will be made in %v", requestsCount, duration)
+	requestsCount := len(historyItems)
+	duration, err := time.ParseDuration(fmt.Sprintf("%vs", requestsCount/(*requestsPerSecond)))
+	if err != nil {
+		log.Fatalf("error parsing duration: %v", err)
 	}
 
-	var allHistoryUrls []string
+	printVerbose(fmt.Sprintf("[*] Making %v requests for approx. %v", requestsCount, duration), *verbose)
+
+	if *estimateTime {
+		if *unique || *outputFolder != "" {
+			fmt.Println("[!] With the unique or output options enabled, the request count(an therefore the time) will be much lower than what's show below")
+		}
+		fmt.Printf("All %v requests will be made in %v", requestsCount, duration)
+		return
+	}
+
 	var wg sync.WaitGroup
-	historicResponses := make([][]byte, len(historyItems))
+	uniqueResponses := make(map[[20]byte][]byte)
 	for i, hi := range historyItems {
 		historyUrl := fmt.Sprintf("https://web.archive.org/web/%vif_/%v", hi.Timestamp, *url)
 
 		if *printUrls {
-			allHistoryUrls = append(allHistoryUrls, historyUrl)
+			fmt.Println(historyUrl)
 			continue
 		}
 
 		if i%*requestsPerSecond == 0 {
+			printVerbose(fmt.Sprintf("[*] Throttoling for a second at request number %v", i), *verbose)
 			time.Sleep(1 * time.Second)
 		}
 
 		wg.Add(1)
 		go func() {
-			addToLog("Hisotry item request url: "+historyUrl, *logFile)
-
 			response, err := get(historyUrl)
 			if err != nil {
 				fmt.Printf("error making history item request: %v", err)
-				addToLog(fmt.Sprintf("ERROR fetching %v: %v", historyUrl, err), *logFile)
+				appendToFile(historyUrl, *logFailFile)
+				return
+			} else {
+				appendToFile(historyUrl, *logSuccessFile)
 			}
 
-			if !*printUrls && !*unique && *output == "" {
+			hashedResponse := sha1.Sum(response)
+
+			if !*printUrls && !*unique && *outputFolder == "" {
 				fmt.Println(string(response))
 			}
 
-			historicResponses = append(historicResponses, response)
+			if *unique {
+				uniqueResponse := string(uniqueResponses[hashedResponse])
+				if uniqueResponse == "" {
+					printVerbose("[*] Found new unique response", *verbose)
+					uniqueResponses[hashedResponse] = response
+					fmt.Println(string(response))
+				}
+			}
+
+			if *outputFolder != "" && !fileExists(fmt.Sprintf("%v/%x", *outputFolder, hashedResponse)) {
+				printVerbose(fmt.Sprintf("[*] Writing new unique response to file with name %x", hashedResponse), *verbose)
+				os.MkdirAll(*outputFolder, os.ModePerm)
+				appendToFile(string(response), fmt.Sprintf("%v/%x", *outputFolder, hashedResponse))
+			}
 
 			wg.Done()
 		}()
 	}
 	wg.Wait()
-
-	uniqueResponses := make(map[[20]byte][]byte)
-	for _, res := range historicResponses {
-		if *output != "" || *unique {
-			uniqueResponses[sha1.Sum(res)] = res
-		}
-
-		if !*unique && !*printUrls && *output == "" {
-			fmt.Println(string(res))
-		}
-	}
-
-	if *unique {
-		for k, _ := range uniqueResponses {
-			fmt.Println(string(uniqueResponses[k]))
-		}
-		return
-	}
-
-	if *printUrls {
-		for _, au := range allHistoryUrls {
-			fmt.Println(au)
-		}
-		return
-	}
-
-	if *output != "" {
-		os.MkdirAll(*output, 0700)
-		for k, _ := range uniqueResponses {
-			err := ioutil.WriteFile(fmt.Sprintf("%v/%x", *output, k), uniqueResponses[k], 0644)
-			if err != nil {
-				log.Fatalf("error writing to file: %v", err)
-			}
-		}
-	}
 }
 
-func addToLog(logRow string, logFile string) {
-	if logFile != "" {
-		f, err := os.OpenFile(logFile,
+func appendToFile(data string, filePath string) {
+	if filePath != "" {
+		f, err := os.OpenFile(filePath,
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			log.Fatalf("error writing to log file: %v", err)
+			log.Fatalf("error writing to file: %v", err)
 		}
 		defer f.Close()
-		if _, err := f.WriteString(logRow + "\n"); err != nil {
-			log.Fatalf("error writing to log file: %v", err)
+		if _, err := f.WriteString(data + "\n"); err != nil {
+			log.Fatalf("error writing to file: %v", err)
 		}
 	}
 }
@@ -203,4 +192,15 @@ func getHistoryItems(requestUrl string) []HistoryItem {
 		})
 	}
 	return timestamps
+}
+
+func fileExists(name string) bool {
+	_, err := os.Stat(name)
+	return !os.IsNotExist(err)
+}
+
+func printVerbose(msg string, verbose bool) {
+	if verbose {
+		fmt.Println(msg)
+	}
 }
