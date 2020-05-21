@@ -7,7 +7,7 @@ It allows you to filter and fetch all response content, from archive.org's wayba
 What it's also useful for, is that it has a few optimisations for preventing being rate limited by the server so often.
 
 ## Install
-The tool is written in Go, so if your Go verison is above 1.9, you can install it using:
+The tool is written in Go and you can install it using:
 
 ```
 go get -u github.com/ctoyan/waybackcollector
